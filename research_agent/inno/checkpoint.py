@@ -273,3 +273,26 @@ def embedding_create(client, **kwargs):
         raise RequestInterrupted('Embedding request failed; resume to resend it') from exc
     journal.finish(slot, result.model_dump())
     return result
+
+
+def ensure_paper_index(memory, collection, content):
+    """Finish every indexing batch even if an earlier batch reached Chroma."""
+    import hashlib
+    journal = _active_journal.get()
+    if journal is None:
+        if memory.count(collection) == 0:
+            memory.add_paper_content(paper_content=content, collection=collection)
+        return
+    request = {'collection': collection, 'content_sha256': hashlib.sha256(content.encode()).hexdigest()}
+    scope = journal.scope.get() + '/index'
+    slot, decision = journal.begin(request, scope)
+    if decision is None:
+        decision = {'needed': memory.count(collection) == 0}
+        journal.finish(slot, decision)
+    slot, completed = journal.begin({'index': request}, scope)
+    if completed is None:
+        if decision['needed']:
+            # PaperMemory uses stable chunk IDs. Replaying committed batches is
+            # idempotent in Chroma and their embedding responses are journaled.
+            memory.add_paper_content(paper_content=content, collection=collection)
+        journal.finish(slot, {'complete': True})

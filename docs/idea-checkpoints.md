@@ -18,7 +18,8 @@ caller, including responses with empty text. Tool outputs, retrieval results,
 and the browser's page, navigation and search state are also persisted. This
 keeps timing-dependent tool text and reader prompts identical during replay.
 Each repeated call remains a separate occurrence, even when its request is
-identical to an earlier call.
+identical to an earlier call. Interrupted paper indexing finishes its remaining
+batches even when earlier batches were already committed to Chroma.
 
 Keep the same papers, prompts, model settings, Python environment and source
 code when resuming. Changed inputs or requests stop replay rather than mixing

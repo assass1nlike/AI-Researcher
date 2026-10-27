@@ -223,6 +223,49 @@ class CheckpointTest(unittest.TestCase):
                     self.assertEqual(backend.call_count,2 if phase=='initial' else 0)
                 cp._active_journal.reset(token);journal.close()
 
+    def test_second_embedding_batch_failure_finishes_partial_paper_index(self):
+        # Run the native PaperMemory batching code; replace only Chroma storage
+        # and token splitting, so a small fixture exercises its 100-chunk boundary.
+        requests = []
+        fail = True
+        def create(**kwargs):
+            requests.append(kwargs)
+            if fail and len(requests) == 2:
+                raise ConnectionError('second batch interrupted')
+            return CreateEmbeddingResponse(data=[{'embedding':[float(i)], 'index':i,
+                'object':'embedding'} for i in range(len(kwargs['input']))],
+                model='embedding-model',object='list',usage={'prompt_tokens':1,'total_tokens':1})
+        client=SimpleNamespace(base_url='https://test.invalid',embeddings=SimpleNamespace(create=create))
+        class Storage:
+            def __init__(self, **kwargs): self.rows = {}
+            def count(self, collection): return len(self.rows)
+            def add_query(self, queries, collection, idx):
+                cp.embedding_create(client,model='embedding-model',input=[q['query'] for q in queries])
+                for key,row in zip(idx,queries):self.rows.setdefault(key,row)
+        dependency=ModuleType('research_agent.inno.memory.rag_memory')
+        dependency.Memory=Storage;dependency.Reranker=object
+        with patch.dict(sys.modules, {'research_agent.inno.memory.rag_memory':dependency}):
+            spec=importlib.util.spec_from_file_location('checkpoint_test_paper_memory',
+                ROOT/'research_agent/inno/memory/paper_memory.py')
+            native=importlib.util.module_from_spec(spec);spec.loader.exec_module(native)
+        memory=native.PaperMemory(project_path='unused')
+        chunks=[{'chunk_order_index':i,'content':f'chunk {i}'} for i in range(101)]
+        with TemporaryDirectory() as tmp, patch.object(native,'chunking_by_token_size',return_value=chunks):
+            path=Path(tmp)/'journal.sqlite3'
+            for phase in ['interrupt','resume','completed']:
+                journal=cp.Journal(path);token=cp._active_journal.set(journal)
+                try:
+                    if phase=='interrupt':
+                        with self.assertRaises(cp.RequestInterrupted):cp.ensure_paper_index(memory,'paper','content')
+                        self.assertEqual(memory.count('paper'),100)
+                    else:
+                        fail=False
+                        cp.ensure_paper_index(memory,'paper','content')
+                        self.assertEqual(memory.count('paper'),101)
+                finally:cp._active_journal.reset(token);journal.close()
+            self.assertEqual([len(r['input']) for r in requests],[100,1,1])
+            self.assertEqual(requests[1],requests[2])
+
     def test_incomplete_response_pending_and_credentials_not_persisted(self):
         with TemporaryDirectory() as tmp:
             journal=cp.Journal(Path(tmp)/'journal.sqlite3');token=cp._active_journal.set(journal)
